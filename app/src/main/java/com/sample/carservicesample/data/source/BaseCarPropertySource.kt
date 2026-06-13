@@ -18,8 +18,6 @@ import kotlinx.coroutines.withContext
 /**
  * 车辆属性基础数据源
  * 封装了 CarPropertyManager 的订阅、注销、初始值拉取等样板代码
- *
- * @param carDispatcher 注入的单线程调度器，用于承载所有车载数据逻辑
  */
 abstract class BaseCarPropertySource<T>(
     protected val carPropertyManager: CarPropertyManager,
@@ -31,7 +29,7 @@ abstract class BaseCarPropertySource<T>(
     private val tag = "CarPropertySource"
 
     /**
-     * 通过反射获取属性 ID 在 VehiclePropertyIds 中对应的常量名，方便调试
+     * 通过反射获取属性 ID 在 VehiclePropertyIds 中对应的常量名
      */
     private val propertyName: String by lazy {
         try {
@@ -49,65 +47,51 @@ abstract class BaseCarPropertySource<T>(
     protected abstract fun mapValue(rawValue: Any?): T?
 
     override suspend fun get(): T? = withContext(carDispatcher) {
+        Log.d(tag, "[$propertyName] 正在获取初始值 (Area: $areaId) 线程: ${Thread.currentThread().name}")
         runCatching {
-            // 使用属性名打印日志
-            Log.d(tag, "get() name=$propertyName running on thread: ${Thread.currentThread().name}")
             val property = carPropertyManager.getProperty<Any>(propertyId, areaId)
-            mapValue(property.value)
+            val result = mapValue(property.value)
+            Log.d(tag, "[$propertyName] 初始值读取成功: $result")
+            result
         }.onFailure {
-            Log.e(tag, "Get property $propertyName failed: ${it.message}")
+            Log.e(tag, "[$propertyName] 读取初始值失败: ${it.message}")
         }.getOrNull()
     }
 
     override fun observe(): Flow<T?> = callbackFlow {
         val callback = object : CarPropertyManager.CarPropertyEventCallback {
             override fun onChangeEvent(value: CarPropertyValue<*>) {
-                // 收到回调
-                Log.d(
-                    tag,
-                    "onChangeEvent: name=$propertyName, thread=${Thread.currentThread().name}"
-                )
                 if (value.propertyId == propertyId && value.areaId == areaId) {
-                    trySend(mapValue(value.value))
+                    val rawValue = value.value
+                    val mappedValue = mapValue(rawValue)
+                    Log.d(tag, "[$propertyName] 收到变化回调: 原始值=$rawValue -> 映射值=$mappedValue (线程: ${Thread.currentThread().name})")
+                    trySend(mappedValue)
                 }
             }
 
             override fun onErrorEvent(propertyId: Int, areaId: Int) {
-                Log.w(tag, "VHAL Error: name=$propertyName, areaId=$areaId")
+                Log.w(tag, "[$propertyName] VHAL 报错 (Area: $areaId)")
             }
         }
 
         try {
-            // 订阅逻辑 (兼容 API 33+)
+            Log.d(tag, "[$propertyName] 正在订阅属性变更...")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                carPropertyManager.subscribePropertyEvents(
-                    propertyId,
-                    CarPropertyManager.SENSOR_RATE_ONCHANGE,
-                    callback
-                )
+                carPropertyManager.subscribePropertyEvents(propertyId, CarPropertyManager.SENSOR_RATE_ONCHANGE, callback)
             } else {
                 @Suppress("DEPRECATION")
-                carPropertyManager.registerCallback(
-                    callback,
-                    propertyId,
-                    CarPropertyManager.SENSOR_RATE_ONCHANGE
-                )
+                carPropertyManager.registerCallback(callback, propertyId, CarPropertyManager.SENSOR_RATE_ONCHANGE)
             }
         } catch (e: SecurityException) {
-            Log.e(tag, "Missing permission for property $propertyName")
+            Log.e(tag, "[$propertyName] 订阅失败：权限不足")
             close(e)
         } catch (e: Exception) {
-            Log.e(tag, "Subscription failed for property $propertyName: ${e.message}")
+            Log.e(tag, "[$propertyName] 订阅异常: ${e.message}")
             close(e)
         }
 
         awaitClose {
-            // 核心改进：通过 flowOn 强制切换，使 awaitClose 也运行在 CarPropertyThread 线程
-            Log.d(
-                tag,
-                "awaitClose name=$propertyName running on thread: ${Thread.currentThread().name}"
-            )
-
+            Log.i(tag, "[$propertyName] Flow 关闭，注销监听器 (线程: ${Thread.currentThread().name})")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 carPropertyManager.unsubscribePropertyEvents(callback)
             } else {
@@ -118,5 +102,5 @@ abstract class BaseCarPropertySource<T>(
     }
     .onStart { emit(get()) }
     .distinctUntilChanged()
-    .flowOn(carDispatcher) // 关键：确保 upstream (callbackFlow 的主体和 awaitClose) 都在后台单线程执行
+    .flowOn(carDispatcher)
 }
