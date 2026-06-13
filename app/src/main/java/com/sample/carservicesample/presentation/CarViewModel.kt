@@ -16,12 +16,12 @@ data class CarUiState(
 )
 
 class CarViewModel(
-    getVehiclePropertiesUseCase: GetVehiclePropertiesUseCase,
+    private val getVehiclePropertiesUseCase: GetVehiclePropertiesUseCase
 ) : ViewModel() {
 
     /**
-     * 使用 stateIn 将业务流转换为 UI 状态流。
-     * 这种方式比在 init 块中使用 viewModelScope.launch 更简洁且响应式。
+     * 恢复标准架构：ViewModel 重新依赖 UseCase。
+     * 聚合逻辑（Combine）已下沉回领域层的 UseCase 中。
      */
     val uiState: StateFlow<CarUiState> = getVehiclePropertiesUseCase()
         .map { properties ->
